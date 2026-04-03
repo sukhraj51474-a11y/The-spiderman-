@@ -1,0 +1,439 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8" />
+<title>WebHero — Swing Demo</title>
+<meta name="viewport" content="width=device-width,initial-scale=1.0,user-scalable=no" />
+<style>
+  html,body { height:100%; margin:0; background:#0b1020; color:#ddd; font-family:Arial,Helvetica,sans-serif; -webkit-user-select:none; -ms-user-select:none; user-select:none; }
+  canvas { display:block; margin:0 auto; background: linear-gradient(#1b2735, #0b1020); touch-action:none; }
+  #ui { position:fixed; left:0; right:0; bottom:6px; display:flex; justify-content:center; gap:12px; pointer-events:none; }
+  .btn { width:72px; height:72px; border-radius:12px; background:rgba(255,255,255,0.06); border:1px solid rgba(255,255,255,0.06); display:flex; align-items:center; justify-content:center; font-size:18px; color:#fff; pointer-events:auto; }
+  #leftPanel { position:fixed; left:8px; bottom:8px; display:flex; gap:8px; pointer-events:none; }
+  .small { width:56px; height:56px; border-radius:10px; background:rgba(255,255,255,0.04); display:flex; align-items:center; justify-content:center; pointer-events:auto; }
+  #hud { position:fixed; left:12px; top:12px; color:#fff; font-weight:bold; text-shadow:0 1px 3px rgba(0,0,0,0.6); }
+  #msg { position:fixed; right:12px; top:12px; color:#7cf; font-weight:600; text-shadow:0 1px 2px rgba(0,0,0,0.6); }
+  #suitName { font-size:14px; color:#ffd480; }
+  @media (min-width:900px) { .btn { width:84px; height:84px; } .small{width:64px;height:64px} }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+
+<div id="hud">
+  Score: <span id="score">0</span><br/>
+  Mission: <span id="mission">Rescue the drone (0/1)</span><br/>
+  Suit: <span id="suitName">Classic</span>
+</div>
+<div id="msg"></div>
+
+<div id="leftPanel">
+  <div id="joystick" style="pointer-events:auto;"></div>
+</div>
+
+<div id="ui">
+  <div class="btn" id="swingBtn">WEB</div>
+  <div class="btn" id="jumpBtn">JUMP</div>
+  <div class="btn" id="suitBtn">SUIT</div>
+  <div class="btn" id="actionBtn">USE</div>
+</div>
+
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d', { alpha: false });
+let DPR = Math.min(window.devicePixelRatio || 1, 2);
+function resize(){ 
+  canvas.width = Math.floor(window.innerWidth * DPR);
+  canvas.height = Math.floor(window.innerHeight * DPR);
+  canvas.style.width = window.innerWidth + 'px';
+  canvas.style.height = window.innerHeight + 'px';
+  ctx.setTransform(DPR,0,0,DPR,0,0);
+}
+window.addEventListener('resize', resize);
+resize();
+
+const world = {
+  width: canvas.width/DPR,
+  height: canvas.height/DPR,
+  gravity: 1600,
+  buildings: [],
+  vehicles: [],
+  enemies: [],
+  anchors: []
+};
+
+const settings = {
+  webMaxDist: 500,
+  webMinDist: 20
+};
+
+let last = performance.now();
+let dt = 0;
+
+const player = {
+  x: 200,
+  y: 200,
+  vx: 0,
+  vy: 0,
+  radius: 18,
+  color: '#ffdf6e',
+  onGround: false,
+  swinging: false,
+  anchor: null,
+  ropeLength: 0,
+  score: 0,
+  suitIndex: 0,
+  suits: [
+    { name:'Classic', modifier:1.0, color:'#ffdf6e' },
+    { name:'Stealth', modifier:0.9, color:'#8bd5a9' },
+    { name:'Tech', modifier:1.1, color:'#9ac7ff' }
+  ]
+};
+
+function generateMap(){
+  world.buildings = [];
+  const cols = Math.max(6, Math.floor(world.width / 140));
+  const spacing = world.width / cols;
+  for(let i=0;i<cols;i++){
+    const w = 80 + Math.random()*60;
+    const h = 120 + Math.random()*420;
+    const bx = i*spacing + spacing*0.5;
+    const by = world.height - h/2 - 80;
+    world.buildings.push({x:bx, y:by, w:w, h:h, color: `rgba(120,120,120,${0.75+Math.random()*0.25})`});
+    world.anchors.push({x:bx, y: by - h/2});
+  }
+  world.vehicles = [];
+  for(let v=0; v<3; v++){
+    const y = world.height - 60;
+    world.vehicles.push({x:100 + v*300, y: y, w:80, h:36, vx: 60 + Math.random()*80, color:'rgba(200,80,80,0.95)'});
+  }
+  world.enemies = [];
+  for(let e=0;e<4;e++){
+    const ex = 150 + e*260;
+    world.enemies.push({x:ex, y: world.height-100, vx: (Math.random()>0.5?60:-60), w:28, h:48, hp:2});
+  }
+}
+generateMap();
+
+let moveX = 0;
+let joystickTouch = null;
+const joy = document.getElementById('joystick');
+joy.style.width = '130px';
+joy.style.height = '130px';
+joy.style.borderRadius = '70px';
+joy.style.background = 'rgba(255,255,255,0.03)';
+joy.style.pointerEvents = 'auto';
+joy.style.display = 'flex';
+joy.style.alignItems='center';
+joy.style.justifyContent='center';
+joy.style.marginLeft='8px';
+
+let innerDot = document.createElement('div');
+innerDot.style.width='46px'; innerDot.style.height='46px';
+innerDot.style.borderRadius='24px'; innerDot.style.background='rgba(255,255,255,0.12)';
+joy.appendChild(innerDot);
+
+function joyStart(e){
+  e.preventDefault();
+  const t = (e.touches? e.touches[0] : e);
+  joystickTouch = t.identifier || 'mouse';
+  touchOrigin = {x: t.clientX, y: t.clientY};
+}
+function joyMove(e){
+  if(!joystickTouch) return;
+  const list = e.touches || [e];
+  let t = null;
+  for(let i=0;i<list.length;i++){
+    if((list[i].identifier || 'mouse') === joystickTouch) { t = list[i]; break; }
+  }
+  if(!t) return;
+  const dx = (t.clientX - touchOrigin.x);
+  const dy = (t.clientY - touchOrigin.y);
+  const max = 50;
+  const nx = Math.max(-1, Math.min(1, dx / max));
+  moveX = nx;
+  innerDot.style.transform = `translate(${nx*36}px, ${Math.max(-36, Math.min(36, dy/2))}px)`;
+}
+function joyEnd(e){
+  joystickTouch = null;
+  moveX = 0;
+  innerDot.style.transform = `translate(0px,0px)`;
+}
+let touchOrigin = {x:0,y:0};
+joy.addEventListener('touchstart', joyStart);
+joy.addEventListener('touchmove', joyMove);
+joy.addEventListener('touchend', joyEnd);
+joy.addEventListener('mousedown', joyStart);
+window.addEventListener('mousemove', joyMove);
+window.addEventListener('mouseup', joyEnd);
+
+const swingBtn = document.getElementById('swingBtn');
+const jumpBtn  = document.getElementById('jumpBtn');
+const suitBtn  = document.getElementById('suitBtn');
+const actionBtn= document.getElementById('actionBtn');
+let swingHeld = false;
+let jumpPressed = false;
+let actionPressed = false;
+
+swingBtn.addEventListener('touchstart', (e)=>{ e.preventDefault(); swingHeld=true; });
+swingBtn.addEventListener('touchend', (e)=>{ e.preventDefault(); swingHeld=false; releaseWeb(); });
+swingBtn.addEventListener('mousedown', ()=>{ swingHeld=true; });
+swingBtn.addEventListener('mouseup', ()=>{ swingHeld=false; releaseWeb(); });
+
+jumpBtn.addEventListener('touchstart', (e)=>{ e.preventDefault(); jumpPressed=true; setTimeout(()=>jumpPressed=false,120); });
+jumpBtn.addEventListener('mousedown', ()=>{ jumpPressed=true; setTimeout(()=>jumpPressed=false,120); });
+
+suitBtn.addEventListener('click', ()=>{ player.suitIndex = (player.suitIndex+1) % player.suits.length; updateSuitUI(); });
+actionBtn.addEventListener('click', ()=>{ actionPressed=true; setTimeout(()=>actionPressed=false,150); });
+
+const keys = {};
+window.addEventListener('keydown', (e)=>{ keys[e.key.toLowerCase()] = true; if(e.key === ' ') { swingHeld = true; } });
+window.addEventListener('keyup', (e)=>{ keys[e.key.toLowerCase()] = false; if(e.key === ' ') { swingHeld = false; releaseWeb(); } });
+
+let gp = null;
+window.addEventListener("gamepadconnected", (e)=>{ gp = e.gamepad; showMsg('Gamepad connected'); });
+window.addEventListener("gamepaddisconnected", ()=>{ gp=null; showMsg('Gamepad disconnected'); });
+
+function pollGamepad(){
+  if(!gp) return;
+  const g = navigator.getGamepads()[gp.index];
+  if(!g) return;
+  if(g.buttons[0].pressed) { jumpPressed = true; setTimeout(()=>jumpPressed=false,120); }
+  if(g.buttons[1].pressed) { if(!swingHeld){ swingHeld=true; } } else { if(swingHeld){ swingHeld=false; releaseWeb(); } }
+  const ax = g.axes[0];
+  if(Math.abs(ax) > 0.15) moveX = ax; else if(!joystickTouch) moveX = 0;
+}
+
+function updateHUD(){ document.getElementById('score').textContent = player.score; document.getElementById('mission').textContent = `Rescue the drone (${missionProgress}/1)`; }
+function updateSuitUI(){ document.getElementById('suitName').textContent = player.suits[player.suitIndex].name; player.color = player.suits[player.suitIndex].color; showMsg('Switched to '+player.suits[player.suitIndex].name); }
+function showMsg(t){ const el = document.getElementById('msg'); el.textContent = t; clearTimeout(el._t); el._t = setTimeout(()=>el.textContent='',2200); }
+
+updateSuitUI();
+
+function findAnchor(){
+  let best = null;
+  const maxd = settings.webMaxDist;
+  for(let a of world.anchors){
+    const dx = a.x - player.x;
+    const dy = a.y - player.y;
+    const d = Math.hypot(dx,dy);
+    if(d < maxd && dy < 0){
+      if(!best || d < best.d) best = {a, d};
+    }
+  }
+  return best ? best.a : null;
+}
+
+function attachWeb(anchor){
+  if(!anchor) return false;
+  player.swinging = true;
+  player.anchor = anchor;
+  player.ropeLength = Math.max(20, Math.hypot(anchor.x - player.x, anchor.y - player.y));
+  player.vx *= 0.6;
+  player.vy *= 0.6;
+  return true;
+}
+
+function releaseWeb(){
+  if(player.swinging){
+    const ax = player.anchor.x;
+    const ay = player.anchor.y;
+    const rx = player.x - ax;
+    const ry = player.y - ay;
+    const perp = {x: -ry, y: rx};
+    const mag = Math.hypot(perp.x, perp.y) || 1;
+    player.vx += (perp.x/mag) * (120 * player.suits[player.suitIndex].modifier);
+    player.vy += (perp.y/mag) * (120 * player.suits[player.suitIndex].modifier);
+    player.swinging = false;
+    player.anchor = null;
+  }
+}
+
+function collideGround(){
+  const gY = world.height - 40;
+  if(player.y + player.radius > gY){
+    player.y = gY - player.radius;
+    player.vy = 0;
+    player.onGround = true;
+  } else player.onGround = false;
+}
+
+let missionProgress = 0;
+const drone = {x: world.width - 200, y: world.height - 320, r: 12, rescued:false};
+
+function updateWorld(dt){
+  for(let v of world.vehicles){
+    v.x += v.vx * dt;
+    if(v.x > world.width + 200) v.x = -200;
+  }
+  for(let e of world.enemies){
+    e.x += e.vx * dt;
+    if(e.x < 0 || e.x > world.width) e.vx *= -1;
+    if(Math.hypot(e.x - player.x, e.y - player.y) < 40){
+      player.vx = (player.x < e.x ? -200 : 200);
+      player.vy = -300;
+    }
+  }
+}
+
+function step(dt){
+  if(gp) pollGamepad();
+
+  let desiredVX = 0;
+  if(keys['a'] || keys['arrowleft']) desiredVX = -180;
+  if(keys['d'] || keys['arrowright']) desiredVX = 180;
+  if(Math.abs(moveX) > 0.05) desiredVX = moveX * 220;
+
+  if(player.swinging){
+    player.vx += (desiredVX - player.vx) * 0.04;
+    const ax = player.anchor.x, ay = player.anchor.y;
+    const dx = player.x - ax, dy = player.y - ay;
+    let d = Math.hypot(dx,dy);
+    const diff = d - player.ropeLength;
+    if(Math.abs(diff) > 0){
+      const nx = dx / d, ny = dy / d;
+      player.vx -= nx * (diff*6) * dt;
+      player.vy -= ny * (diff*6) * dt;
+    }
+    player.vy += world.gravity * dt * 0.75;
+  } else {
+    const acc = 1200 * dt;
+    if(player.vx < desiredVX) player.vx = Math.min(desiredVX, player.vx + acc);
+    if(player.vx > desiredVX) player.vx = Math.max(desiredVX, player.vx - acc);
+    player.vy += world.gravity * dt;
+    if(jumpPressed && player.onGround){
+      player.vy = -520 * player.suits[player.suitIndex].modifier;
+      player.onGround = false;
+      jumpPressed = false;
+    }
+  }
+
+  if(swingHeld && !player.swinging){
+    const anchor = findAnchor();
+    if(anchor) attachWeb(anchor);
+  }
+
+  player.x += player.vx * dt;
+  player.y += player.vy * dt;
+
+  collideGround();
+
+  if(player.x < -100) player.x = world.width + 100;
+  if(player.x > world.width + 100) player.x = -100;
+
+  if(!drone.rescued && Math.hypot(player.x - drone.x, player.y - drone.y) < 40){
+    drone.rescued = true;
+    player.score += 500;
+    missionProgress = 1;
+    showMsg('Drone rescued!');
+  }
+
+  if(actionPressed){
+    for(let v of world.vehicles){
+      if(Math.hypot(player.x - v.x, player.y - v.y) < 80){
+        player.x = v.x;
+        player.y = v.y - 50;
+        player.vx = v.vx + 40;
+        showMsg('You hitched a ride!');
+      }
+    }
+  }
+
+  updateWorld(dt);
+  updateHUD();
+}
+
+function draw(){
+  const w = world.width, h = world.height;
+  ctx.fillStyle = '#0b1020';
+  ctx.fillRect(0,0,canvas.width/DPR, canvas.height/DPR);
+
+  const camX = Math.max(0, Math.min(world.width - canvas.width/DPR, player.x - canvas.width/DPR/2));
+  const camY = 0;
+
+  ctx.save();
+  ctx.translate(-camX, -camY);
+
+  for(let b of world.buildings){
+    ctx.fillStyle = b.color;
+    ctx.fillRect(b.x - b.w/2, b.y - b.h/2, b.w, b.h);
+    ctx.fillStyle = 'rgba(255,255,255,0.03)';
+    for(let wx=-b.w/2+6; wx<b.w/2-6; wx+=14){
+      for(let wy=-b.h/2+10; wy<b.h/2-10; wy+=16){
+        if(Math.random() > 0.75) ctx.fillRect(b.x + wx, b.y + wy, 8, 8);
+      }
+    }
+  }
+
+  for(let v of world.vehicles){
+    ctx.fillStyle = v.color;
+    ctx.fillRect(v.x - v.w/2, v.y - v.h/2, v.w, v.h);
+    ctx.fillStyle = '#222';
+    ctx.fillRect(v.x - v.w/3, v.y + v.h/2 - 6, 18, 6);
+    ctx.fillRect(v.x + v.w/6, v.y + v.h/2 - 6, 18, 6);
+  }
+
+  if(!drone.rescued){
+    ctx.fillStyle = '#ffd480';
+    ctx.beginPath(); ctx.arc(drone.x, drone.y, drone.r, 0, Math.PI*2); ctx.fill();
+    ctx.fillStyle='#000'; ctx.font='12px Arial'; ctx.fillText('DRONE', drone.x-20, drone.y-18);
+  }
+
+  for(let e of world.enemies){
+    ctx.fillStyle = '#ff8080';
+    ctx.fillRect(e.x - e.w/2, e.y - e.h, e.w, e.h);
+  }
+
+  if(player.swinging && player.anchor){
+    ctx.strokeStyle = 'rgba(160,220,255,0.9)';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(player.anchor.x, player.anchor.y);
+    ctx.lineTo(player.x, player.y);
+    ctx.stroke();
+    ctx.fillStyle = '#9cf';
+    ctx.beginPath(); ctx.arc(player.anchor.x, player.anchor.y, 6, 0, Math.PI*2); ctx.fill();
+  }
+
+  ctx.fillStyle = player.color;
+  ctx.beginPath(); ctx.arc(player.x, player.y, player.radius, 0, Math.PI*2); ctx.fill();
+  ctx.fillStyle = 'rgba(0,0,0,0.18)';
+  ctx.beginPath(); ctx.ellipse(player.x+6, player.y-4, 8, 6, -0.7, 0, Math.PI*2); ctx.fill();
+
+  ctx.restore();
+
+  ctx.fillStyle = 'rgba(255,255,255,0.06)';
+  ctx.fillRect(8, canvas.height/DPR - 60, 260, 48);
+  ctx.fillStyle = '#cde';
+  ctx.font = '12px Arial';
+  ctx.fillText('Hold WEB to attach web, release to launch. Use joystick or A/D keys.', 14, canvas.height/DPR - 32);
+}
+
+function loop(now){
+  dt = Math.min(0.05, (now - last) / 1000);
+  last = now;
+  step(dt);
+  draw();
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+
+player.x = world.width*0.15;
+player.y = world.height - 140;
+
+canvas.addEventListener('click', (e)=>{
+  const rect = canvas.getBoundingClientRect();
+  const mx = (e.clientX - rect.left);
+  const my = (e.clientY - rect.top);
+  let best=null;
+  for(let a of world.anchors){
+    const d = Math.hypot(a.x - mx, a.y - my);
+    if(!best || d < best.d) best = {a, d};
+  }
+  if(best && best.d < 80) { attachWeb(best.a); }
+});
+
+document.body.addEventListener('touchmove', function(e){ e.preventDefault(); }, {passive:false});
+</script>
+</body>
+</html>
